@@ -164,8 +164,15 @@
   #define CAP_TOUCH        1
   #define CAP_ROTATABLE    1   // landscape (ROT_90) by default; portrait for the build without a keyboard
   #define CAP_LARGE_SCREEN 0
-  #define CAP_SD           0
-  #define CAP_FILESYSTEM   0
+  // v1.9 adds a microSD slot on the shared LoRa SPI bus (mounted in main.cpp);
+  // v1.0 has no card slot.
+  #if defined(HAS_ATTAKY_MESH_V19_SD)
+    #define CAP_SD           1
+    #define CAP_FILESYSTEM   1
+  #else
+    #define CAP_SD           0
+    #define CAP_FILESYSTEM   0
+  #endif
   #define CAP_GPS          1
   #define CAP_OTA          1
   #define CAP_LOCK_SCREEN  0
@@ -389,8 +396,8 @@
   #define CAP_KBD_BACKLIGHT 0
 #endif
 
-// Notification-chime hardware: T-Deck I2S speaker, Pager codec, Heltec V4 / M9 GPIO
-// piezo, T-Display P4 ES8311. Kept in step with the HAS_UI_SOUND definition in
+// Notification-chime hardware: T-Deck I2S speaker, Pager codec, Heltec V4 / M9 / Attaky v1.9
+// GPIO piezo, T-Display P4 ES8311. Kept in step with the HAS_UI_SOUND definition in
 // UITask.cpp, which now derives FROM this rather than duplicating the list.
 //
 // This used to read `#if defined(HAS_UI_SOUND)`, but HAS_UI_SOUND is defined inside
@@ -400,7 +407,8 @@
 // would have compiled sound out everywhere. Every macro tested here is a -D on the
 // compiler command line, so they are all genuinely visible at this point.
 #if defined(HAS_TDECK_GT911) || defined(HELTEC_V4_BUZZER_PIN) || defined(TLORA_PAGER) || \
-    defined(THINKNODE_M9_BUZZER_PIN) || defined(HAS_TDISPLAY_P4)
+    defined(THINKNODE_M9_BUZZER_PIN) || defined(HAS_TDISPLAY_P4) || \
+    defined(ATTAKY_MESH_SERIES_BUZZER_PIN)
   #define CAP_SOUND 1
 #else
   #define CAP_SOUND 0

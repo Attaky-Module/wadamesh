@@ -1,3 +1,76 @@
+<div align="center">
+
+  <a href="https://attaky.com">
+    <img alt="Attaky" src="./.github/attaky-logo-horizontal.png" width="32%" />
+  </a>
+
+  <h2>WadaMesh firmware for the Attaky Mesh series</h2>
+
+  <p>
+    <img src="https://img.shields.io/badge/board-Attaky_Core_1.0-C0252B?style=flat-square" alt="Attaky Core 1.0" />
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-GPL_3.0-blue?style=flat-square" alt="License" /></a>
+    <a href="https://discord.attaky.com"><img src="https://img.shields.io/badge/Discord-attaky-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord" /></a>
+  </p>
+
+  <a href="https://attaky.com">Attaky home</a>
+  &nbsp;·&nbsp;
+  <a href="https://discord.attaky.com">Discord</a>
+
+</div>
+
+> This repository is a fork of [WadaMesh](https://github.com/ALLFATHER-BV/wadamesh),
+> originally developed by ALLFATHER-BV, last modified by Attaky on **2026-10-20** from
+> upstream **`beta_91`**, to add support for the **Attaky Mesh series** of off-grid LoRa
+> devices. Inherits WadaMesh's **GPL-3.0-or-later** license.
+
+## Compatible devices
+
+This release supports the Attaky Mesh series built on Attaky Core 1.0 with the LoRa + GPS
+module:
+
+- **Mesh Pocket Junior 1.0**
+- **Mesh Deck Junior 1.0** *(with the integrated keyboard)*
+- **Mesh Station Junior 1.0**
+
+## What this fork adds on top of WadaMesh
+
+- **Attaky Core 1.0 build target** — the `attaky_mesh_series_companion_radio_touch`
+  PlatformIO environment
+- **Display and touch** — the landscape touchscreen interface on the Attaky panel
+- **LoRa and GPS** — off-grid mesh radio and positioning on the Attaky LoRa + GPS module
+- **Battery telemetry** — battery level from the Attaky power modules
+- **Hardware keyboard** — the optional Attaky keyboard module alongside the on-screen
+  keyboard, including the setup wizard
+
+The Attaky board code lives in its own variant and build environment. A few small fixes
+in the shared touch UI (keyboard focus in settings fields and the setup wizard, and a
+storage guard) also apply to other boards; everything else in upstream WadaMesh is
+unchanged.
+
+## Build & flash
+
+Install [PlatformIO](https://platformio.org/), clone this repository, then build or upload
+the Attaky environment:
+
+```bash
+git clone -b release-master https://github.com/Attaky-Module/wadamesh.git
+cd wadamesh
+pio run -e attaky_mesh_series_companion_radio_touch
+pio run -e attaky_mesh_series_companion_radio_touch -t upload --upload-port <port>
+```
+
+Or install it from the Attaky firmware store in your browser.
+
+## Support
+
+- **Attaky Mesh series / this fork** — Attaky [Discord](https://discord.attaky.com)
+- **WadaMesh upstream firmware** — file at
+  [`ALLFATHER-BV/wadamesh`](https://github.com/ALLFATHER-BV/wadamesh/issues)
+
+---
+
+# ↓ Upstream WadaMesh README ↓
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/wadamesh-readme-dark.svg">

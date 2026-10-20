@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#include "AttakyMeshSeriesBoard.h"
+#include "AttakySharedI2C.h"
+#if defined(HAS_ATTAKY_MESH_MOTOR)
+  #include "AttakyMeshSeriesHaptic.h"
+#endif
+#include <SPI.h>
+#include <Wire.h>
+
+#define MAX17048_ADDR        0x36
+#define MAX17048_REG_VCELL   0x02
+
+void AttakyMeshSeriesBoard::begin() {
+    ESP32Board::begin();
+
+    attakyI2cInit();
+
+#if defined(HAS_ATTAKY_MESH_MOTOR)
+    // Park the motor line (AW9523 @0x59 P14, active-high) before anything else:
+    // out of POR the port is high-Z and a floating line runs the motor.
+    attakyHapticInit();
+#endif
+
+    esp_reset_reason_t reason = esp_reset_reason();
+    if (reason == ESP_RST_DEEPSLEEP) {
+      long wakeup_source = esp_sleep_get_ext1_wakeup_status();
+      if (wakeup_source & (1 << P_LORA_DIO_1)) {
+        startup_reason = BD_STARTUP_RX_PACKET;
+      }
+
+      rtc_gpio_hold_dis((gpio_num_t)P_LORA_NSS);
+      rtc_gpio_deinit((gpio_num_t)P_LORA_DIO_1);
+    }
+
+    // The global-SPI display path does not initialize the bus.
+#if defined(PIN_TFT_LEDA_CTL) && (PIN_TFT_LEDA_CTL >= 0)
+    pinMode(PIN_TFT_LEDA_CTL, OUTPUT);
+    digitalWrite(PIN_TFT_LEDA_CTL, HIGH);
+#endif
+    SPI.begin(PIN_TFT_SCL, -1, PIN_TFT_SDA, PIN_TFT_CS);
+  }
+
+  void AttakyMeshSeriesBoard::onBeforeTransmit(void) { }
+
+  void AttakyMeshSeriesBoard::onAfterTransmit(void) { }
+
+  void AttakyMeshSeriesBoard::enterDeepSleep(uint32_t secs, int pin_wake_btn) {
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+
+    rtc_gpio_set_direction((gpio_num_t)P_LORA_DIO_1, RTC_GPIO_MODE_INPUT_ONLY);
+    rtc_gpio_pulldown_en((gpio_num_t)P_LORA_DIO_1);
+
+    rtc_gpio_hold_en((gpio_num_t)P_LORA_NSS);
+
+    if (pin_wake_btn < 0) {
+      esp_sleep_enable_ext1_wakeup( (1L << P_LORA_DIO_1), ESP_EXT1_WAKEUP_ANY_HIGH);
+    } else {
+      esp_sleep_enable_ext1_wakeup( (1L << P_LORA_DIO_1) | (1L << pin_wake_btn), ESP_EXT1_WAKEUP_ANY_HIGH);
+    }
+
+    if (secs > 0) {
+      esp_sleep_enable_timer_wakeup(secs * 1000000);
+    }
+
+    esp_deep_sleep_start();
+  }
+
+  void AttakyMeshSeriesBoard::powerOff()  {
+    enterDeepSleep(0);
+  }
+
+  // Probe order: INA226 @0x40 (18650 Cell 1.0, die-ID verified), INA219 @0x44
+  // (Power 1.9, config echo verified), MAX17048 @0x36 (Power 1.0, VCELL).
+  // INA226 goes first: both INA chips span 0x40-0x4F with the same register
+  // layout, so the weaker INA219 check cannot separate them.
+  // MAX17048 VCELL is 78.125 uV/LSB.
+  uint16_t AttakyMeshSeriesBoard::getBattMilliVolts()  {
+    static const uint32_t kProbeRetryMs = 2000;
+    uint32_t now = millis();
+    if (batt_cache_mv != 0 && (uint32_t)(now - batt_last_ms) < 2000) return batt_cache_mv;
+    if (gauge_kind == GAUGE_UNKNOWN && batt_probed &&
+        (uint32_t)(now - batt_probe_ms) < kProbeRetryMs) {
+      return batt_cache_mv ? batt_cache_mv : 4000;
+    }
+    if (!attakyI2cLock(30)) return batt_cache_mv ? batt_cache_mv : 4000;
+
+    if (gauge_kind == GAUGE_UNKNOWN) {
+      batt_probed   = true;
+      batt_probe_ms = now;
+      if (ina226.begin()) gauge_kind = GAUGE_INA226;
+      else if (ina219.begin()) gauge_kind = GAUGE_INA219;
+    }
+
+    if (gauge_kind == GAUGE_INA226 || gauge_kind == GAUGE_INA219) {
+      // readBusVoltage() returns NaN on any I2C failure; keep the last good value.
+      float v = (gauge_kind == GAUGE_INA226) ? ina226.readBusVoltage()
+                                             : ina219.readBusVoltage();
+      if (!isnan(v)) {
+        batt_cache_mv = (uint16_t)(v * 1000.0f + 0.5f);
+        batt_last_ms  = now;
+      }
+    } else {
+      // A clean VCELL read confirms the chip.
+      Wire.beginTransmission(MAX17048_ADDR);
+      Wire.write(MAX17048_REG_VCELL);
+      if (Wire.endTransmission(false) == 0 && Wire.requestFrom((int)MAX17048_ADDR, 2) == 2) {
+        uint16_t raw = ((uint16_t)Wire.read() << 8) | Wire.read();
+        batt_cache_mv = (uint16_t)(((uint32_t)raw * 5) / 64);
+        batt_last_ms  = now;
+        gauge_kind    = GAUGE_MAX17048;
+      }
+    }
+
+    attakyI2cUnlock();
+    return batt_cache_mv ? batt_cache_mv : 4000;
+  }
+
+  const char* AttakyMeshSeriesBoard::getManufacturerName() const {
+    return "Attaky Core";
+  }

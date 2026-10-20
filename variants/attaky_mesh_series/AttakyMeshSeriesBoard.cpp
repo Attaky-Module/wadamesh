@@ -61,24 +61,49 @@ void AttakyMeshSeriesBoard::begin() {
     enterDeepSleep(0);
   }
 
+  // Probe order: INA226 @0x40 (18650 Cell 1.0, die-ID verified), INA219 @0x44
+  // (Power 1.9, config echo verified), MAX17048 @0x36 (Power 1.0, VCELL).
+  // INA226 goes first: both INA chips span 0x40-0x4F with the same register
+  // layout, so the weaker INA219 check cannot separate them.
   // MAX17048 VCELL is 78.125 uV/LSB.
   uint16_t AttakyMeshSeriesBoard::getBattMilliVolts()  {
+    static const uint32_t kProbeRetryMs = 2000;
     uint32_t now = millis();
     if (batt_cache_mv != 0 && (uint32_t)(now - batt_last_ms) < 2000) return batt_cache_mv;
+    if (gauge_kind == GAUGE_UNKNOWN && batt_probed &&
+        (uint32_t)(now - batt_probe_ms) < kProbeRetryMs) {
+      return batt_cache_mv ? batt_cache_mv : 4000;
+    }
     if (!attakyI2cLock(30)) return batt_cache_mv ? batt_cache_mv : 4000;
-    uint16_t raw = 0;
-    bool ok = false;
-    Wire.beginTransmission(MAX17048_ADDR);
-    Wire.write(MAX17048_REG_VCELL);
-    if (Wire.endTransmission(false) == 0 && Wire.requestFrom((int)MAX17048_ADDR, 2) == 2) {
-      raw = ((uint16_t)Wire.read() << 8) | Wire.read();
-      ok = true;
+
+    if (gauge_kind == GAUGE_UNKNOWN) {
+      batt_probed   = true;
+      batt_probe_ms = now;
+      if (ina226.begin()) gauge_kind = GAUGE_INA226;
+      else if (ina219.begin()) gauge_kind = GAUGE_INA219;
     }
+
+    if (gauge_kind == GAUGE_INA226 || gauge_kind == GAUGE_INA219) {
+      // readBusVoltage() returns NaN on any I2C failure; keep the last good value.
+      float v = (gauge_kind == GAUGE_INA226) ? ina226.readBusVoltage()
+                                             : ina219.readBusVoltage();
+      if (!isnan(v)) {
+        batt_cache_mv = (uint16_t)(v * 1000.0f + 0.5f);
+        batt_last_ms  = now;
+      }
+    } else {
+      // A clean VCELL read confirms the chip.
+      Wire.beginTransmission(MAX17048_ADDR);
+      Wire.write(MAX17048_REG_VCELL);
+      if (Wire.endTransmission(false) == 0 && Wire.requestFrom((int)MAX17048_ADDR, 2) == 2) {
+        uint16_t raw = ((uint16_t)Wire.read() << 8) | Wire.read();
+        batt_cache_mv = (uint16_t)(((uint32_t)raw * 5) / 64);
+        batt_last_ms  = now;
+        gauge_kind    = GAUGE_MAX17048;
+      }
+    }
+
     attakyI2cUnlock();
-    if (ok) {
-      batt_cache_mv = (uint16_t)(((uint32_t)raw * 5) / 64);
-      batt_last_ms  = now;
-    }
     return batt_cache_mv ? batt_cache_mv : 4000;
   }
 

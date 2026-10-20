@@ -38,7 +38,6 @@ static const uint8_t BIT_NAV[8] = {
   ATTAKY_NAV_NONE,     // P07 POWER_BTN — attakyPowerKeyPressed()
 };
 
-static bool     s_inited   = false;
 static bool     s_present  = false;
 static uint32_t s_next_ms  = 0;
 
@@ -82,25 +81,27 @@ static bool awReadInP0(uint8_t* val) {
   return true;
 }
 
-static void ensureInit() {
-  if (s_inited) return;
-  s_inited = true;
-  if (!attakyI2cLock(30)) { s_inited = false; return; }   // retry on the next poll
+// Retries on every poll until the expander answers, so a busy shared bus or a
+// transient NACK at boot cannot leave POWER_BTN dead for the whole boot.
+static bool ensureInit() {
+  if (s_present) return true;
+  if (!attakyI2cLock(30)) return false;   // bus busy — retry on the next poll
   // P0 as GPIO inputs (POR defaults, but the touch driver shares this expander,
   // so set them explicitly rather than depend on init order).
   bool ok = awWrite(AW_REG_MODE_P0, 0xFF);   // GPIO mode, not LED mode
   ok &= awWrite(AW_REG_CFG_P0,  0xFF);       // all inputs
   s_present = ok;
   attakyI2cUnlock();
+  return ok;
 }
 
 void attakyKeysPoll() {
-  ensureInit();
-  if (!s_present) return;
-
+  // Gate first so a failing expander is re-probed at the poll interval, not every loop.
   const uint32_t now = millis();
   if ((int32_t)(now - s_next_ms) < 0) return;
   s_next_ms = now + POLL_INTERVAL_MS;
+
+  if (!ensureInit()) return;
 
   uint8_t p0 = 0xFF;
   bool ok = false;

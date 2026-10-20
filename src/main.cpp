@@ -56,7 +56,7 @@ static uint32_t _atoi(const char* sp) {
     #include <SD_MMC.h>
     #include <WioTrackerL2Io.h>
   #endif
-  #if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HAS_CROWPANEL_35)
+  #if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HAS_CROWPANEL_35) || defined(HAS_ATTAKY_MESH_V19_SD)
     #if defined(HAS_CROWPANEL_35)
     #include <CrowPanel35SD.h>
     #else
@@ -274,7 +274,7 @@ extern volatile uint8_t g_wifi_last_disc_reason;
 
 #include "esp_task_wdt.h"   // task-watchdog reconfigure — see setup() (GH #56)
 
-#if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HAS_CROWPANEL_35)
+#if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HAS_CROWPANEL_35) || defined(HAS_ATTAKY_MESH_V19_SD)
 // ---- SPIFFS -> SD migration (fixes the beta_36 "lost my profile" upgrades) ----
 // Users who flipped "Store data on SD" before beta_36 ran with the toggle IGNORED
 // (the flag never survived a reboot), so their identity/prefs/contacts kept living
@@ -1093,7 +1093,7 @@ void setup() {
     Serial.println("[BOOT] wio-l2 SD_MMC unavailable; using SPIFFS");
   }
 #endif
-#if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HAS_CROWPANEL_35)
+#if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HAS_CROWPANEL_35) || defined(HAS_ATTAKY_MESH_V19_SD)
   {
    #if !defined(HAS_CROWPANEL_35)
    #if defined(TLORA_PAGER)
@@ -1102,6 +1102,8 @@ void setup() {
     extern SPIClass* heltecV4R8SharedSPI();   // FSPI, shared with the TFT (CS=3)
    #elif defined(HAS_THINKNODE_M9)
     extern SPIClass* m9SharedSPI();           // radio/display/SD shared bus
+   #elif defined(HAS_ATTAKY_MESH_V19_SD)
+    extern SPIClass* attakyMeshSeriesSharedSPI();   // LoRa SPI bus (microSD, CS=39)
    #else
     extern SPIClass* tdeckSharedSPI();        // LoRa SPI bus
    #endif
@@ -1135,6 +1137,8 @@ void setup() {
     SPIClass* _spi = heltecV4R8SharedSPI();
    #elif defined(HAS_THINKNODE_M9)
     SPIClass* _spi = m9SharedSPI();
+   #elif defined(HAS_ATTAKY_MESH_V19_SD)
+    SPIClass* _spi = attakyMeshSeriesSharedSPI();
    #else
     SPIClass* _spi = tdeckSharedSPI();
    #endif
@@ -1428,7 +1432,7 @@ void setup() {
   #if defined(HAS_WIO_TRACKER_L2)
     SdNvsPrefs::useFile(sd_storage ? (fs::FS*)&SD_MMC : (fs::FS*)&SPIFFS,
                         sd_storage ? "/meshcomod" : "/prefs");
-  #elif defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HAS_CROWPANEL_35)
+  #elif defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HAS_CROWPANEL_35) || defined(HAS_ATTAKY_MESH_V19_SD)
     SdNvsPrefs::useFile(sd_storage ? (fs::FS*)&SD : (fs::FS*)&SPIFFS,
                         sd_storage ? "/meshcomod" : "/prefs");
   #else

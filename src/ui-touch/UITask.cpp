@@ -74,11 +74,14 @@ static void* wadaMp3Scratch() { return s_wada_mp3_scratch; }
 #endif
 #if defined(HAS_CROWPANEL_35)
   #include <CrowPanel35SD.h>
-#elif defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#elif defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8) || defined(HAS_ATTAKY_MESH_V19_SD)
   #include <SD.h>             // microSD — T-Deck/M9 on the LoRa SPI, V4-R8 on the TFT SPI
   #include "SdFastClock.h"    // post-mount operating-clock raise (SD_SPI_FAST_HZ boards)
   #include "sd_diskio.h"      // internal Arduino-SD drive helpers (sdcard_init / sd_*_raw)
   extern SPIClass* tdeckSharedSPI();
+  #if defined(HAS_ATTAKY_MESH_V19_SD)
+    extern SPIClass* attakyMeshSeriesSharedSPI();
+  #endif
   // FatFs mkfs (the prebuilt ESP-IDF compiles f_setlabel OUT — FF_USE_LABEL=0 —
   // so the "MESHCOMOD" volume label is written by hand via sd_*_raw, below).
   extern "C" int f_mkfs(const char* path, uint8_t opt, uint32_t au, void* work, unsigned len);
@@ -180,6 +183,9 @@ static_assert(ChannelSenderSplit::kMaxWireName >= (size_t)UITask::MAX_SENDER_NAM
   #endif
   #if defined(ATTAKY_MESH_SERIES)
     #include <AttakyMeshSeriesKeys.h>
+  #endif
+  #if defined(HAS_ATTAKY_MESH_MOTOR)
+    #include <AttakyMeshSeriesHaptic.h>
   #endif
   #include "KeyboardLayouts.h"
   #include "i18n.h"
@@ -1871,7 +1877,7 @@ static void pagerPreviewWavFile(const char* prefpath) {
 #endif  // HAS_TDECK_GT911 || TLORA_PAGER
 
 // ---- Unified UI notification sound (T-Deck I2S / pager codec / Heltec V4 + Elecrow M9
-//      piezo / T-Display P4 ES8311 codec) ----
+//      piezo + Attaky v1.9 piezo / T-Display P4 ES8311 codec) ----
 // One source of truth: device_caps.h computes the same board list as CAP_SOUND.
 #if CAP_SOUND
   #define HAS_UI_SOUND 1
@@ -1915,9 +1921,11 @@ static void p4PlayNotifySlot(int slot) {
 }
 #endif
 
-#if defined(HELTEC_V4_BUZZER_PIN) || defined(THINKNODE_M9_BUZZER_PIN)
+#if defined(HELTEC_V4_BUZZER_PIN) || defined(THINKNODE_M9_BUZZER_PIN) || defined(ATTAKY_MESH_SERIES_BUZZER_PIN)
 #if defined(HELTEC_V4_BUZZER_PIN)
   #define UI_BUZZER_PIN HELTEC_V4_BUZZER_PIN
+#elif defined(ATTAKY_MESH_SERIES_BUZZER_PIN)
+  #define UI_BUZZER_PIN ATTAKY_MESH_SERIES_BUZZER_PIN
 #else
   #define UI_BUZZER_PIN THINKNODE_M9_BUZZER_PIN
 #endif
@@ -1976,8 +1984,11 @@ static inline void uiPlaySlot(int slot) {
   p4PlayNotifySlot(slot);                // ES8311 codec chimes (same patterns as the T-Deck)
 #elif defined(TLORA_PAGER)
   pagerPlayNotifySlot(slot);
-#elif defined(HELTEC_V4_BUZZER_PIN) || defined(THINKNODE_M9_BUZZER_PIN)
+#elif defined(HELTEC_V4_BUZZER_PIN) || defined(THINKNODE_M9_BUZZER_PIN) || defined(ATTAKY_MESH_SERIES_BUZZER_PIN)
   v4BuzzerBeep(slot == TOUCH_SND_MEN);   // mention = higher trill; msg/DM = the lower chime
+#if defined(HAS_ATTAKY_MESH_MOTOR)
+  attakyHapticNotifyPulse();             // vibrate alongside the chime
+#endif
 #elif defined(HAS_TANMATSU)
   tanBeep();   // single codec tick on these boards (no per-slot sounds)
 #endif
@@ -7428,6 +7439,14 @@ static bool s_seg_stale_purge = false;
 // the still-authoritative old-format file on the next boot) — it retries the
 // migration instead.
 static bool s_seg_store_ready = false;
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+// v1.9 has no card-detect line, so the cached card state can outlive the card.
+// History may only be flushed or migrated once the boot load established a valid
+// generation: loaded from a readable store, or a store proven readable and empty.
+static bool s_v19_hist_gen_ok = false;
+static bool s_v19_hist_load_io_failed = false;   // boot load hit an unreadable store or a failed migration
+static bool s_v19_persist_ok = false;            // last persistHistoryNow() landed both files
+#endif
 // Durability watermark: highest seq that has landed in a segment file. Ring
 // records with seq above it are the pending-append backlog. Loop-task-owned;
 // advanced only when a write is COMMITTED (worker job observed ok, or a sync
@@ -8487,6 +8506,11 @@ static void kbMirrorEnsureCreated() {
   lv_obj_set_style_pad_ver(s_kb_mirror_root, 6, LV_PART_MAIN);
   lv_obj_clear_flag(s_kb_mirror_root, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(s_kb_mirror_root, LV_OBJ_FLAG_HIDDEN);
+  // The mirror strip is a touch-typing surface, never a nav target. With
+  // CAP_KEYPAD_NAV every show/hide would otherwise flip which top-layer child
+  // is the frontmost visible one (navTopFrontmostChild), re-signing the nav
+  // tree and forcing a focus-group rebuild on every OSK toggle.
+  lv_obj_add_flag(s_kb_mirror_root, NAV_SKIP_FLAG);
 
   lv_obj_t* hint = lv_label_create(s_kb_mirror_root);
   lv_label_set_text(hint, TR("Editing"));
@@ -11647,6 +11671,18 @@ static void settingsFieldFocusCb(lv_event_t* e) {
   if (code != LV_EVENT_FOCUSED && code != LV_EVENT_CLICKED) return;
   if (s_kb_dismiss_pending) return;
   if (!g_lv.keyboard) return;
+#if defined(HAS_ATTAKY_MESH_KEYBOARD) || (CAP_EXT_KEYBOARD && !CAP_KEYBOARD)
+  // Programmatic focus (the nav group auto-focusing the first field of a fresh
+  // page, e.g. the setup wizard's name step) must not summon the on-screen keys
+  // when no external keyboard is typing: on a board with both CAP_KEYPAD_NAV and
+  // an on-screen keyboard the OSK would pop on page entry, and every dismissal
+  // (hideKb -> nav tree re-sign -> rebuild -> refocus) pops it straight back —
+  // uncloseable. A real tap still opens the keys below (CLICKED passes, and a
+  // touch-driven FOCUSED carries a pointer indev); a present external keyboard
+  // still gets the bind armed here (suppressed, keys stay down) so D-pad nav +
+  // module typing keeps working.
+  if (code == LV_EVENT_FOCUSED && !lv_indev_get_act() && !externalKeyboardTyping()) return;
+#endif
   // Belt-and-suspenders: even CLICKED can fire at the tail end of a flick
   // if the touch happened to lift while still on the textarea. Same guard
   // used for contactSelectCb — if anything is currently being scrolled,
@@ -15051,11 +15087,33 @@ static void sdRestoreRun() {
     return;
   }
 
+  // Mirror meshcomodMigrateSpiffsToSd()'s own first guard BEFORE any card
+  // mutation or latch arming: with no internal identity there is nothing to
+  // adopt, and the armed-then-refused latch would otherwise demote the next
+  // boot of an SD-born profile to SPIFFS with a re-minted identity.
+  if (!SPIFFS.exists("/identity/_main.id")) {
+    g_lv.task->showAlert(TR("Nothing to copy: no internal profile on this device"), 3000);
+    return;
+  }
+
   WdtHeavyGuard idle_wdt_guard;
 
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  if (g_full_data_on_sd && !s_v19_hist_gen_ok) {
+    g_lv.task->showAlert(TR("Copy blocked: SD card holds a different or unreadable profile"), 3600);
+    return;
+  }
+#endif
   // Land everything in RAM first. The history worker and queued A/B preference
   // snapshots must both be idle before the migration opens either filesystem.
   g_lv.task->persistHistoryNow();
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  if (!s_v19_persist_ok) {
+    g_sd_migration_blocked = true;
+    g_lv.task->showAlert(TR("Copy blocked: internal data is busy"), 2600);
+    return;
+  }
+#endif
   discoveredFlushNow();
   the_mesh.flushContactsIfDirty();
   the_mesh.persistSyncHistoryNow();
@@ -24365,6 +24423,8 @@ static inline SPIClass* sdSharedSPI() { return tloraPagerSharedSPI(); }
 static inline SPIClass* sdSharedSPI() { return heltecV4R8SharedSPI(); }   // V4-R8: micro-SD shares the TFT FSPI bus (CS=3)
 #elif defined(HAS_THINKNODE_M9)
 static inline SPIClass* sdSharedSPI() { return m9SharedSPI(); }
+#elif defined(HAS_ATTAKY_MESH_V19_SD)
+static inline SPIClass* sdSharedSPI() { return attakyMeshSeriesSharedSPI(); }   // microSD shares the LoRa SPI bus (CS=39)
 #else
 static inline SPIClass* sdSharedSPI() { return tdeckSharedSPI(); }
 #endif
@@ -24669,7 +24729,7 @@ static void fmHideFormatOverlay() {
 //     retries the mount, and the alert it raises on failure points at the host.
 // Formatting a card on a computer is a 30-second task with no such risk. Revisit
 // only with a Pager in hand and a card that is safe to lose.
-#if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)   // SD format helpers resume (Arduino SD targets)
+#if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8) || defined(HAS_ATTAKY_MESH_V19_SD)   // SD format helpers resume (Arduino SD targets)
 // Confirm callback: paint the formatting notice, then defer the (blocking)
 // f_mkfs to UITask::loop so the notice is on-screen before the loop freezes.
 static void fmSdDoFormat() {
@@ -26060,7 +26120,7 @@ static void fmShowRoots() {
   fmStyleRow(b, COLOR_TEXT);
   lv_obj_add_event_cb(b, fmInternalClickCb, LV_EVENT_CLICKED, nullptr);
 
-#if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)  // microSD row (Arduino SD targets)
+#if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8) || defined(HAS_ATTAKY_MESH_V19_SD)  // microSD row (Arduino SD targets)
   // Probe the SD only when not in a mount-backoff window, so a persistently
   // unmountable card doesn't re-grind the full retry ladder on every render of
   // this page. Tapping the row below (fmSdMountOrFormatCb) bypasses the gate.
@@ -62988,6 +63048,10 @@ static void buildUiTree() {
   lv_obj_set_size(g_lv.keyboard, lv_disp_get_hor_res(nullptr), CHAT_KB_H);
   lv_obj_align(g_lv.keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
   lv_obj_add_flag(g_lv.keyboard, LV_OBJ_FLAG_HIDDEN);
+  // Same NAV_SKIP treatment as the mirror strip: the on-screen keys are touch
+  // targets, not focus stops — and letting the nav collector see them flips
+  // the nav tree signature on every show/hide (rebuild churn while typing).
+  lv_obj_add_flag(g_lv.keyboard, NAV_SKIP_FLAG);
 #if defined(HELTEC_V4_EXPANSION_IO_PIN) && !defined(HELTEC_LORA_V4_R8)
   // Magnify the selected key above the finger before release. The compact V4
   // maps mark character keys as POPOVER-capable; LVGL leaves the feature off
@@ -64318,6 +64382,9 @@ void UITask::flushHistoryIfDue(unsigned long now) {
       showAlert(msg, 3200);
     }
   }
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  if (!s_v19_hist_gen_ok) return;   // no valid boot generation: never overwrite or purge the store
+#endif
   // Thread metadata (~4 KB) flushes on a short delay; the message ring
   // (scales with MAX_UI_MESSAGES) flushes lazily to reduce flash write pressure.
   if (_threads_dirty && now >= _next_threads_flush_ms) {
@@ -64425,16 +64492,34 @@ static char    s_ui_data_root[16] = "";
 #if defined(HAS_WIO_TRACKER_L2)
 extern bool g_full_data_on_sd;   // boot adopted the SD_MMC profile
 #endif
-#if defined(TLORA_PAGER)
+#if defined(TLORA_PAGER) || defined(HAS_ATTAKY_MESH_V19_SD)
 static bool    s_ui_data_boot_finalized = false;
 #endif
 // History stays on the filesystem selected during UITask::begin() for the
 // whole boot. Switching a live ring from SPIFFS to a newly inserted card can
 // purge history that was never loaded into RAM; switching a 5000-record SD ring
 // to SPIFFS can fill the small internal partition.
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+// Real card I/O (write, read back, remove): sdAdoptLiveMount() only trusts the
+// cached cardType(), which stays valid after the card is pulled.
+static bool v19SdIoProbe() {
+  static const char* kProbe = "/meshcomod/.io_probe";
+  SD.mkdir("/meshcomod");
+  File w = SD.open(kProbe, FILE_WRITE);
+  if (!w) return false;
+  const bool wrote = w.write((uint8_t)'x') == 1;
+  w.close();
+  bool read_back = false;
+  if (wrote) {
+    File r = SD.open(kProbe, FILE_READ);
+    if (r) { read_back = r.read() == 'x'; r.close(); }
+  }
+  return SD.remove(kProbe) && read_back;
+}
+#endif
 static bool uiDataFsReady() {
   if (s_ui_data_fs != nullptr) return true;   // cache SUCCESS only — a failed resolve MUST stay retryable
-#if defined(TLORA_PAGER)
+#if defined(TLORA_PAGER) || defined(HAS_ATTAKY_MESH_V19_SD)
   if (s_ui_data_boot_finalized) {
     // A boot-adopted card owns the active identity/profile. Never fall back to
     // another profile's internal history if that card becomes unavailable. If
@@ -64531,8 +64616,8 @@ static bool uiDataFsReady() {
     return true;
   }
   if (SPIFFS.begin(false)) { s_ui_data_fs = &SPIFFS; s_ui_data_root[0] = '\0'; return true; }
-#elif defined(HELTEC_LORA_V4_R8)
-  // R8 (Expansion Kit V2, REMOVABLE card): follow the boot adoption decision,
+#elif defined(HELTEC_LORA_V4_R8) || defined(HAS_ATTAKY_MESH_V19_SD)
+  // R8 / Attaky v1.9 (REMOVABLE card): follow the boot adoption decision,
   // never bare card presence — mirrors the pager's profile-keyed shape. When
   // the boot store adopted the card (g_full_data_on_sd: identity/prefs/
   // contacts live there), chat history + battery log + Lua app files follow;
@@ -64541,6 +64626,9 @@ static bool uiDataFsReady() {
   // card — Settings > Storage > "Copy internal data to SD" refreshes it.
   if (g_full_data_on_sd) {
     if (!(sdAdoptLiveMount() || fmSdTryMount())) return false;
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+    if (!v19SdIoProbe()) return false;
+#endif
     SD.mkdir("/meshcomod");
     s_ui_data_fs = &SD;
     strncpy(s_ui_data_root, "/meshcomod", sizeof s_ui_data_root - 1);
@@ -66097,6 +66185,23 @@ static void uiDataRemove(const char* name) {
   char p[80]; snprintf(p, sizeof p, "%s%s", s_ui_data_root, name);
   s_ui_data_fs->remove(p);
 }
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+// A failed open/read on SD may be a pulled card, not a corrupt file: probe the
+// card first; on failure mark the boot load untrusted and touch nothing.
+static bool v19HistIoBad() {
+  if (s_v19_hist_load_io_failed) return true;   // sticky: never re-trust after a failed probe
+  if (s_ui_data_fs != &SD || v19SdIoProbe()) return false;
+  s_v19_hist_load_io_failed = true;
+  return true;
+}
+#endif
+// Quarantine after a failed load; on v19 only when the card itself is healthy.
+static void uiDataQuarantine(const char* name) {
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  if (v19HistIoBad()) return;
+#endif
+  uiDataRemove(name);
+}
 // Atomically replace a ui-data file (write tmp, then rename) so a panic mid-write
 // cannot leave a truncated header that quarantines the whole chat on next boot.
 static bool uiDataReplaceFile(const char* final_name, const char* tmp_name) {
@@ -66128,11 +66233,11 @@ bool UITask::loadThreadsFromStorage() {
   if (f.readBytes(reinterpret_cast<char*>(&hdr), sizeof(hdr)) != static_cast<int>(sizeof(hdr)) ||
       hdr.magic != k_ui_threads_magic ||
       hdr.version < k_ui_history_min_version || hdr.version > k_ui_history_version) {
-    f.close(); uiDataRemove(k_ui_threads_path); return false;   // corrupt header — quarantine so it can't wedge every boot
+    f.close(); uiDataQuarantine(k_ui_threads_path); return false;   // corrupt header — quarantine so it can't wedge every boot
   }
   const size_t disk_sz =
       (hdr.version >= 5 && hdr.thread_rec_size) ? hdr.thread_rec_size : sizeof(UiHistoryThread);
-  if (disk_sz == 0 || disk_sz > 4096) { f.close(); uiDataRemove(k_ui_threads_path); return false; }
+  if (disk_sz == 0 || disk_sz > 4096) { f.close(); uiDataQuarantine(k_ui_threads_path); return false; }
   // Restore the companion message counter carried here for the segmented msgs
   // store (older writers left it 0; the msgs-file loaders overwrite it anyway
   // when they run, and the mesh re-asserts it with every message).
@@ -66140,7 +66245,7 @@ bool UITask::loadThreadsFromStorage() {
 
   UiHistoryThread t{};
   for (int i = 0; i < MAX_UI_THREADS; ++i) {
-    if (!readHistoryRec(f, &t, sizeof(t), disk_sz)) { f.close(); uiDataRemove(k_ui_threads_path); return false; }   // truncated/corrupt record
+    if (!readHistoryRec(f, &t, sizeof(t), disk_sz)) { f.close(); uiDataQuarantine(k_ui_threads_path); return false; }   // truncated/corrupt record
     _ui_threads[i].used              = t.used != 0;
     _ui_threads[i].channel           = t.channel != 0;
     _ui_threads[i].unread            = t.unread;
@@ -66177,11 +66282,11 @@ bool UITask::loadMsgsFromStorage() {
   if (f.readBytes(reinterpret_cast<char*>(&hdr), sizeof(hdr)) != static_cast<int>(sizeof(hdr)) ||
       hdr.magic != k_ui_msgs_magic ||
       hdr.version < k_ui_history_min_version || hdr.version > k_ui_history_version) {
-    f.close(); uiDataRemove(k_ui_msgs_path); return false;   // corrupt header — quarantine so it can't crash/wedge every boot
+    f.close(); uiDataQuarantine(k_ui_msgs_path); return false;   // corrupt header — quarantine so it can't crash/wedge every boot
   }
   const size_t disk_sz =
       (hdr.version >= 5 && hdr.msg_rec_size) ? hdr.msg_rec_size : sizeof(UiHistoryMsg);
-  if (disk_sz == 0 || disk_sz > 4096) { f.close(); uiDataRemove(k_ui_msgs_path); return false; }
+  if (disk_sz == 0 || disk_sz > 4096) { f.close(); uiDataQuarantine(k_ui_msgs_path); return false; }
 
   // The file carries the WRITER's full ring (one record per slot), so its slot
   // count is derived from the file size — NOT from this build's capacity. That
@@ -66202,7 +66307,7 @@ bool UITask::loadMsgsFromStorage() {
   }
   if (file_slots <= 0 ||
       hdr.ui_msg_count > file_slots || hdr.ui_msg_head >= file_slots) {
-    f.close(); uiDataRemove(k_ui_msgs_path); return false;   // header disagrees with the file body
+    f.close(); uiDataQuarantine(k_ui_msgs_path); return false;   // header disagrees with the file body
   }
 
   // Linearize while reading: chronological rank c of file slot i is derived from
@@ -66215,7 +66320,7 @@ bool UITask::loadMsgsFromStorage() {
 
   UiHistoryMsg m{};
   for (int i = 0; i < file_slots; ++i) {
-    if (!readHistoryRec(f, &m, sizeof(m), disk_sz)) { f.close(); uiDataRemove(k_ui_msgs_path); return false; }   // truncated/corrupt record
+    if (!readHistoryRec(f, &m, sizeof(m), disk_sz)) { f.close(); uiDataQuarantine(k_ui_msgs_path); return false; }   // truncated/corrupt record
     const int c = (i - oldest + file_slots) % file_slots;   // chronological rank (0 = oldest)
     if (c < drop || c >= n_file) continue;                  // empty slot / outside the kept window
     UIMessage& d = _ui_msgs[c - drop];
@@ -66259,6 +66364,9 @@ bool UITask::loadMsgsFromSegments() {
   const int nseg = uiSegScan(seqs, k_ui_seg_max, true /*sweep orphaned tmps*/);
   s_seg_count = 0;
   s_seg_total_bytes = 0;
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  if (nseg < 0) s_v19_hist_load_io_failed = true;   // scan location unreadable, not "no segments"
+#endif
   if (nseg <= 0) return false;
   // Commit marker missing => this segment set is an unfinished migration (a
   // power cut between chunk writes). Wipe it and let the caller fall back to
@@ -66269,6 +66377,9 @@ bool UITask::loadMsgsFromSegments() {
     const bool have_marker = (bool)okf;
     if (okf) okf.close();
     if (!have_marker) {
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+      if (v19HistIoBad()) return false;   // unreadable marker is not a missing marker
+#endif
       for (int i = 0; i < nseg; ++i) uiSegRemoveFile(seqs[i]);
       return false;
     }
@@ -66281,6 +66392,9 @@ bool UITask::loadMsgsFromSegments() {
     File f;
     uint16_t rec_sz = 0;
     if (!uiSegOpenValidated(seqs[si], f, &rec_sz)) {
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+      if (v19HistIoBad()) { s_seg_count = 0; s_seg_total_bytes = 0; return false; }
+#endif
       uiSegRemoveFile(seqs[si]);   // quarantine THIS segment only
       continue;
     }
@@ -66304,7 +66418,14 @@ bool UITask::loadMsgsFromSegments() {
       ++w;
       ++nrec;
     }
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+    // A read error looks like EOF; stopping short of the file end is suspect.
+    const bool short_read = f.position() < f.size();
     f.close();
+    if (short_read && v19HistIoBad()) { s_seg_count = 0; s_seg_total_bytes = 0; return false; }
+#else
+    f.close();
+#endif
     info.disk_recs = nrec;
     info.live_recs = nrec;
     info.bytes     = (uint32_t)sizeof(UiSegHeader) + (uint32_t)nrec * (uint32_t)rec_sz;
@@ -66322,7 +66443,13 @@ bool UITask::loadMsgsFromSegments() {
     // The file holds records the table doesn't account for — rewrite it so disk
     // and table agree again (also drops the dead weight for good).
     if (skipped) info.rewrite_open = 1;
-    if (nrec == 0) { uiSegRemoveFile(seqs[si]); continue; }   // header-only husk — reclaim
+    if (nrec == 0) {
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+      if (v19HistIoBad()) { s_seg_count = 0; s_seg_total_bytes = 0; return false; }
+#endif
+      uiSegRemoveFile(seqs[si]);   // header-only husk — reclaim
+      continue;
+    }
     if (s_seg_count < k_ui_seg_max) s_seg[s_seg_count++] = info;
   }
 
@@ -66356,6 +66483,9 @@ bool UITask::loadMsgsFromSegments() {
   const uint32_t min_kept_seq = n_keep > 0 ? _ui_msgs[0].seq : 0;
   int out = 0;
   uint32_t total_bytes = 0;
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  if (v19HistIoBad()) { s_seg_count = 0; s_seg_total_bytes = 0; return false; }   // before any reconcile delete
+#endif
   for (int i = 0; i < s_seg_count; ++i) {
     if (n_keep == 0 || s_seg[i].last_seq < min_kept_seq) {
       uiSegRemoveFile(s_seg[i].first_seq);
@@ -66391,7 +66521,13 @@ bool UITask::loadMsgsFromSegments() {
 // would otherwise shadow it in the loader's precedence order).
 bool UITask::migrateRingToSegments() {
 #if defined(ESP32)
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  if (s_v19_hist_load_io_failed) return false;   // never rewrite a store the boot load could not read
+#endif
   Serial.println("[chatstore] migration: starting");
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  if (v19HistIoBad()) return false;   // before removing the marker / earlier segments
+#endif
   uiDataEnsureDirs();
   // The marker goes away FIRST: from here until the verified end of this
   // migration the on-disk segment set is provisional, and a boot that finds it
@@ -66490,6 +66626,21 @@ bool UITask::migrateRingToSegments() {
     okf.print("segstore v1\n");
     okf.close();
   }
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  {   // the old file is the only good copy until the marker reads back
+    bool marker_ok = false;
+    File rk = uiDataOpen(k_ui_seg_ok, FILE_READ);
+    if (rk) { marker_ok = rk.read() == 's'; rk.close(); }
+    if (!marker_ok || v19HistIoBad()) {
+      Serial.println("[chatstore] migration: commit marker not verified; old file kept");
+      s_v19_hist_load_io_failed = true;
+      for (int i = 0; i < s_seg_count; ++i) uiSegRemoveFile(s_seg[i].first_seq);
+      s_seg_count = 0;
+      s_seg_total_bytes = 0;
+      return false;
+    }
+  }
+#endif
   uint32_t total_bytes = 0;
   for (int i = 0; i < s_seg_count; ++i) total_bytes += s_seg[i].bytes;
   s_seg_total_bytes = total_bytes;
@@ -66603,11 +66754,17 @@ bool UITask::loadLegacyHistoryFromStorage() {
 bool UITask::loadHistoryFromStorage() {
 #if defined(ESP32)
   const bool have_threads = loadThreadsFromStorage();
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  if (s_v19_hist_load_io_failed) return false;   // threads quarantine probe failed: touch nothing more
+#endif
   // Format precedence: segments (generation 3) > split v6 single file >
   // legacy combined file. The older loaders are retained as migration
   // readers; whenever one of them supplies the ring, migrateRingToSegments()
   // below converts it (verify-then-delete, rollback on any failure).
   const bool from_segments = loadMsgsFromSegments();
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  if (s_v19_hist_load_io_failed) return false;   // unreadable store: no cleanup, legacy load or migration
+#endif
   bool have_msgs = from_segments;
   if (!from_segments) {
     // Single-file-era hygiene: a crash mid-flush can orphan a temp file;
@@ -66658,7 +66815,11 @@ bool UITask::loadHistoryFromStorage() {
       _ui_msgs[slot].seq = (uint32_t)(i + 1);
     }
     _ui_seq_next = (uint32_t)_ui_msg_count + 1;
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+    if (!migrateRingToSegments()) s_v19_hist_load_io_failed = true;
+#else
     migrateRingToSegments();
+#endif
   }
   return true;
 #else
@@ -66676,6 +66837,9 @@ bool UITask::saveThreadsToStorage() {
     p4StorageCall([](void* p){ auto* a = (A*)p; a->ok = a->t->saveThreadsToStorage(); }, &a);
     return a.ok;
   }
+#endif
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  if (!s_v19_hist_gen_ok) return false;
 #endif
   WdtHeavyGuard _wg;
   // Write to the tmp, commit with rename: a power cut mid-write leaves the old
@@ -67367,6 +67531,9 @@ bool UITask::saveMsgsToStorage() {
   // empirically reliable path on the shared SPI bus. Returns true only when
   // everything is durable.
   if (!uiDataFsReady()) return false;
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  if (!s_v19_hist_gen_ok) return false;
+#endif
   // A worker that outlived uiHistWaitWorkerIdle's 9 s cap still holds a segment
   // file OPEN. Writing here would remove/rename a path under that open handle:
   // with FF_FS_LOCK=0 the stalled handle keeps writing into clusters the FS has
@@ -68424,7 +68591,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     tzset();
   }
 
-#if defined(TLORA_PAGER) || defined(HELTEC_LORA_V4_R8)
+#if defined(TLORA_PAGER) || defined(HELTEC_LORA_V4_R8) || defined(HAS_ATTAKY_MESH_V19_SD)
   // Boot storage setup may have mounted SD before UITask starts. Synchronize
   // the UI's lifecycle state before tile-backend selection and before the
   // first loop tick can run health/remount logic. (R8: without this the
@@ -68595,7 +68762,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     WIRE_DBG("[TILE] microSD-tile mode -> caching Wi-Fi tiles on SD /tiles (merges with library)");
   }
 #endif
-#if defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8) || defined(HAS_ATTAKY_MESH_V19_SD)
   // Prefer the SD card for the Wi-Fi tile cache even when "Tiles from SD card"
   // is off. The 4.75 MB tiles partition fills after a few panned screens of
   // downloads and has NO eviction, after which every further tile fetch fails
@@ -68608,7 +68775,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   // M9: the card is BUILT IN — always worth walking the full mount ladder.
   if (s_tile_fs != &SD && (sdAdoptLiveMount() || fmSdTryMount())) {
 #else
-  // R8: the Expansion-Kit card is REMOVABLE — follow the boot mount only
+  // R8 / Attaky v1.9: the card is REMOVABLE — follow the boot mount only
   // (adopting is a cached cardType() check; a card-less boot pays nothing and
   // a late-inserted card is adopted by sdHealthTick + mapNoteStorageChanged).
   if (s_tile_fs != &SD && sdAdoptLiveMount()) {
@@ -68779,8 +68946,14 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _next_threads_flush_ms = 0;
   _msgs_dirty = false;
   _next_msgs_flush_ms = 0;
+#if defined(HAS_ATTAKY_MESH_V19_SD)
   loadHistoryFromStorage();
-#if defined(TLORA_PAGER)
+  s_v19_hist_gen_ok = s_ui_data_fs != nullptr && !s_v19_hist_load_io_failed &&
+                      (s_ui_data_fs != &SD || v19SdIoProbe());
+#else
+  loadHistoryFromStorage();
+#endif
+#if defined(TLORA_PAGER) || defined(HAS_ATTAKY_MESH_V19_SD)
   // From here on, the loaded ring and its filesystem are one atomic history
   // generation. If no backing store was available, wait for a reboot rather
   // than adopting an inserted card whose on-disk history was never loaded.
@@ -71788,8 +71961,13 @@ bool UITask::enableBle() {
 
 void UITask::persistHistoryNow() {
   uiHistWaitWorkerIdle();   // writes below cover strictly newer data
+#if defined(HAS_ATTAKY_MESH_V19_SD)
+  const bool threads_ok = saveThreadsToStorage();
+  s_v19_persist_ok = saveMsgsToStorage() && threads_ok;
+#else
   saveThreadsToStorage();
   saveMsgsToStorage();
+#endif
 }
 
 void UITask::rebootDevice() {
@@ -73292,6 +73470,9 @@ void UITask::loop() {
 
     // Nothing to draw while the panel is dark; skip the render entirely.
     if (!_screen_off) consoleLoop();
+#if defined(HAS_ATTAKY_MESH_MOTOR)
+    attakyHapticPoll();
+#endif
     return;                      // the graphical loop is never entered
   }
 #endif
@@ -73983,7 +74164,12 @@ void UITask::loop() {
   }
 
 #if defined(HAS_TOUCH_UI)
-  if (!g_lv.ready) return;
+  if (!g_lv.ready) {
+#if defined(HAS_ATTAKY_MESH_MOTOR)
+    attakyHapticPoll();
+#endif
+    return;
+  }
   rx24Sample(now);   // packets heard per hour, for the lock screen's activity line
 
 #if CAP_TOUCH
@@ -74455,6 +74641,9 @@ void UITask::loop() {
   // POWER_BTN (AW9523 @0x59 P07) toggles the panel. Polled before the screen-off
   // early-outs so it works with the backlight down; it is this board's only wake.
   attakyKeysPoll();
+#if defined(HAS_ATTAKY_MESH_MOTOR)
+  attakyHapticPoll();   // expire the notify pulse; retry a failed park
+#endif
   if (attakyPowerKeyPressed()) {
     if (_screen_off) wakeScreen();
     else             sleepScreen();
@@ -74497,7 +74686,10 @@ void UITask::loop() {
         }
         else if (s_kb_panel) lv_textarea_add_char(akb_ta, '\n');   // enter-sends off: compose multi-line
         else if (cmdLineEnter()) break;   // terminal / admin CLI: run it, keep the field ready
-        else                 lv_event_send(g_lv.keyboard, LV_EVENT_READY, nullptr);  // settings field: confirm
+        else {
+          lv_event_send(g_lv.keyboard, LV_EVENT_READY, nullptr);   // settings field: confirm
+          break;   // READY may hide/rebind the keyboard; refresh akb_ta next loop
+        }
       }
       else if (key == 0x08 || key == 0x7F) lv_textarea_del_char(akb_ta);
       // '#' summons the on-screen keys for this editing session (hideKb clears it),
@@ -74757,7 +74949,7 @@ void UITask::loop() {
 #endif
   uiCp("ui:tail");
 #if (CAP_SD || defined(TLORA_PAGER)) && \
-  (defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9))
+  (defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HELTEC_LORA_V4_R8) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HAS_ATTAKY_MESH_V19_SD))
   sdRestoreRun();   // intentionally outside the LVGL event/render call stack
 #endif
 #if !defined(HAS_TANMATSU)
@@ -74775,7 +74967,7 @@ void UITask::loop() {
       lv_group_focus_obj(s_nav_last);
   }
 #endif
-#if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8)
+#if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HAS_THINKNODE_M9) || defined(HELTEC_LORA_V4_R8) || defined(HAS_ATTAKY_MESH_V19_SD)
   // Deferred microSD FAT32 format (runs a couple ticks after the notice paints).
   // f_mkfs blocks the loop for tens of seconds on a big card, so drop the loop
   // watchdog around it (CPU0 idle keeps running, so no reset) to avoid a
@@ -74954,7 +75146,7 @@ static const PopupEnt k_popup_registry[] = {
   { P_OPEN(s_local_sensors_root),    []{ closeLocalSensorsPage(); },      PF_COUNT },   // was in no registry at all
 #endif
   { P_OPEN(s_siginfo_root),          []{ closeSigInfoPopup(); },          PF_COUNT },
-#if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HAS_TANMATSU) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9)
+#if defined(HAS_TDECK_GT911) || defined(HAS_TDECK_PRO) || defined(HAS_TANMATSU) || defined(TLORA_PAGER) || defined(HAS_THINKNODE_M9) || defined(HAS_ATTAKY_MESH_V19_SD)
   { P_OPEN(s_fm_img_root),           []{ fmImageClose(); },               PF_COUNT },
   { P_OPEN(s_editor_root),           []{ fmEditorClose(); },              PF_COUNT },
   { P_OPEN(s_fm_prompt),             []{ fmPromptClose(); },              PF_COUNT },
