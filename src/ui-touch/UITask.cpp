@@ -123,6 +123,9 @@
   #if defined(HAS_ATTAKY_MESH_KEYBOARD)
     #include <AttakyMeshSeriesKeyboard.h>
   #endif
+  #if defined(ATTAKY_MESH_SERIES)
+    #include <AttakyMeshSeriesKeys.h>
+  #endif
   #include "KeyboardLayouts.h"
   #include "i18n.h"
   #include "emoji_data.h"     // baked Noto colour-emoji glyphs (emojiGlyphLookup)
@@ -1593,9 +1596,21 @@ static lv_obj_t* s_kb_bind_ta = nullptr;
 // end-cursor, so backspace deleted the last character no matter where the caret
 // was. When this returns false, kbMirrorBind binds the field directly and the
 // mirror sync / redirects below are skipped.
+// Set while the module's '#' key has summoned the on-screen keyboard back for the
+// current editing session; hideKb clears it. See the '#' case in the poll loop.
+static bool s_osk_forced = false;
+
 static inline bool kbMirrorActive() {
 #if CAP_KEYBOARD
   return false;   // physical keyboard: bind keys straight to the field, never show the on-screen kb
+#elif defined(HAS_ATTAKY_MESH_KEYBOARD)
+  // Attaky carries its physical keyboard on a DETACHABLE module, so one build has
+  // to serve both cases and the choice cannot be the compile-time CAP_KEYBOARD
+  // switch — that would hide the on-screen keyboard even with no module fitted.
+  // While the module answers on I2C, behave exactly as CAP_KEYBOARD does; with no
+  // module the on-screen keyboard behaves exactly as upstream — unless '#' has
+  // asked for the keys back, which reverts to the on-screen path for that field.
+  return !(attakyKeyboardPresent() && !s_osk_forced);
 #else
   return true;
 #endif
@@ -5404,6 +5419,13 @@ static void hideKb() {
   txtMenuHide();   // tear down any open edit menu
   kbMirrorSyncToReal();
   s_kb_bind_ta = nullptr;
+  // The summon lasts one editing session; the next field starts with the keys down.
+  // Put the panel back on letters as well, so the symbol mode the summon opened is
+  // not what a later reveal inherits -- with no module fitted these keys are reached
+  // the upstream way and should look upstream. Only the summon touches the mode, so
+  // boards without the module keep LVGL's own carry-the-last-mode behaviour.
+  if (s_osk_forced && g_lv.keyboard) lv_keyboard_set_mode(g_lv.keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+  s_osk_forced = false;
   if (s_kb_mirror_root) lv_obj_add_flag(s_kb_mirror_root, LV_OBJ_FLAG_HIDDEN);
   if (g_lv.keyboard) {
     lv_keyboard_set_textarea(g_lv.keyboard, nullptr);
@@ -5471,6 +5493,13 @@ static void showKb(LvChatPanel* p) {
 #if !CAP_KEYBOARD
   // No on-screen keyboard on the T-Deck — the physical keyboard types straight
   // into the composer (already visible), so skip showing the keys + the lift.
+#if defined(HAS_ATTAKY_MESH_KEYBOARD)
+  // Attaky does the same for as long as its keyboard module is attached, until
+  // the module's '#' key asks for the keys back. The kbMirrorActive() check
+  // covers the kbMirrorBind path used by settings fields; the chat composer
+  // comes through here instead and needs its own guard.
+  if (attakyKeyboardPresent() && !s_osk_forced) return;
+#endif
   lv_obj_clear_flag(g_lv.keyboard, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(g_lv.keyboard);
   // Shrink message area to keep composer visible above keyboard.
@@ -6102,7 +6131,28 @@ static void composerSuggestRefresh() {
 
 static void keyboardCb(lv_event_t* e) {
   lv_event_code_t code = lv_event_get_code(e);
-  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) { accentExit(); accentBoxHide(); hideKb(); }
+  if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+    accentExit(); accentBoxHide();
+#if defined(HAS_ATTAKY_MESH_KEYBOARD)
+    // Dismissing the keys must not kill the module. hideKb() unbinds the keyboard's
+    // textarea, and the module's scan is gated on that binding
+    // (attakyKeyboardPoll(akb_ta != nullptr)) — so on a board whose keys are normally
+    // suppressed, closing them left the module dead until another field was tapped.
+    // Note the field down and put it back on the direct bind afterwards: keys down,
+    // module still typing, which is the state a suppressed field starts in.
+    LvChatPanel* const kb_panel = s_kb_panel;
+    lv_obj_t* const    kb_field = s_kb_bind_ta;
+#endif
+    hideKb();
+#if defined(HAS_ATTAKY_MESH_KEYBOARD)
+    if (attakyKeyboardPresent()) {
+      if (kb_panel && kb_panel->composer_ta && lv_obj_is_valid(kb_panel->composer_ta))
+        showKb(kb_panel);            // chat: rebind + refocus the composer, keys stay down
+      else if (kb_field && lv_obj_is_valid(kb_field))
+        kbMirrorBind(kb_field);      // settings-style field: straight back to the direct bind
+    }
+#endif
+  }
   // VALUE_CHANGED fires for any keypress (incl. backspace). Fade the rotate
   // arrows down to ~20% so they don't compete visually with the text the
   // user is typing. Reset to full opacity on the next showKb / kbMirrorBind.
@@ -6726,10 +6776,11 @@ static void threadSelectCb(lv_event_t* e) {
 #endif
 }
 
-static void sendFromPanelCb(lv_event_t* e) {
-  if (lv_event_get_code(e) != LV_EVENT_CLICKED || !g_lv.task) return;
-  auto* p = static_cast<LvChatPanel*>(lv_event_get_user_data(e));
-  if (!p || !p->composer_ta) return;
+// Send what the panel's composer holds, then clear it. Split out of the send
+// button's callback so a physical keyboard's Enter can reach the same path
+// without a second copy of the send sequence.
+static void composerSendFromPanel(LvChatPanel* p) {
+  if (!g_lv.task || !p || !p->composer_ta) return;
   const char* text = lv_textarea_get_text(p->composer_ta);
   if (!text || !text[0]) return;
   hideKb();
@@ -6741,6 +6792,11 @@ static void sendFromPanelCb(lv_event_t* e) {
     refreshChatDetailAsync(*p);
     g_lv.dirty_threads = true;
   }
+}
+
+static void sendFromPanelCb(lv_event_t* e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+  composerSendFromPanel(static_cast<LvChatPanel*>(lv_event_get_user_data(e)));
 }
 
 // ---- Quick-reply macro picker (composer bar → list icon) ----
@@ -7418,6 +7474,13 @@ static void toggleGpsCb(lv_event_t* e) {   // GPS on/off switch (VALUE_CHANGED)
 // board-gated) so both the sound chokepoint and the status-bar icon code can call
 // it on every board. Silently inactive if the RTC hasn't been set yet.
 static bool dndActive() {
+#if !defined(HAS_UI_SOUND) && !defined(HAS_TANMATSU)
+  // Boards with no sound hardware have nothing to silence: the chime chokepoint
+  // below is compiled out there, so DND would only ever paint a status-bar icon.
+  // Answering "never active" also clears a stale enabled-pref left on a device
+  // that ran a build whose control centre still offered the toggle.
+  return false;
+#else
   if (!touchPrefsGetDndEnabled()) return false;
   time_t now_t = time(nullptr);
   if (now_t <= 1700000000) return false;   // RTC not set yet -- clock is meaningless
@@ -7427,6 +7490,7 @@ static bool dndActive() {
   const int end   = (int)touchPrefsGetDndEndSlot()   * 30;
   // start == end -> zero-length window, always false here (never active).
   return (start <= end) ? (t >= start && t < end) : (t >= start || t < end);
+#endif
 }
 
 // Do Not Disturb master switch (under the Sound settings section). Stays silent
@@ -21860,14 +21924,12 @@ static void makeHome(lv_obj_t* tab) {
   lv_obj_set_ext_click_area(s_home_chart_legend, 8);
   lv_obj_add_event_cb(s_home_chart_legend, homeChartClickedCb, LV_EVENT_CLICKED, nullptr);
 
-#if defined(HAS_TDECK_GT911) || defined(HAS_TANMATSU) || defined(TLORA_PAGER) || defined(HAS_RAK_TAP_V2) || defined(HAS_THINKNODE_M9)
-  // Landscape (T-Deck / Tanmatsu / pager / RAK Tap V2 / M9): the right column holds
-  // Advert + Terminal + Files/Apps + Control, so the chart must stop short of that
-  // strip — else it draws over the buttons.
+  // Landscape: the right column holds Advert + Terminal + Files/Apps + Control, so
+  // the chart must stop short of that strip — else it draws over the buttons. The
+  // column is placed on `home_land` alone (see the Advert button below), so key the
+  // width off the same condition rather than a board list, as the unread/stats/env
+  // widgets above already do.
   const int chart_w = home_land ? (cw - RSTRIP) : cw;
-#else
-  const int chart_w = cw;
-#endif
   // Fit the chart in the remaining vertical space: content height minus the
   // tab padding, the chart's top offset, and the Send-advert button + gaps.
   // Portrait keeps the full 96 px; landscape (short screen) shrinks it so the
@@ -28085,6 +28147,9 @@ static void makeSettings(lv_obj_t* tab) {
 #endif
 #if !defined(HAS_EXPANSION_KIT)
     if (c == CAT_SENSORS) continue;   // Sensors page only exists with the V4 Expansion Kit
+#endif
+#if !defined(HAS_UI_SOUND) && !defined(HAS_TANMATSU)
+    if (c == CAT_SOUND) continue;     // no sound hardware -> the page has no working control left
 #endif
     lv_obj_t* card = lv_btn_create(land);
     lv_obj_remove_style_all(card);
@@ -35414,7 +35479,9 @@ static void openControlCenter() {
 #if defined(HAS_UI_SOUND) || defined(HAS_TANMATSU)
   chip_count++;
 #endif
-  chip_count++;   // Do Not Disturb (all boards)
+#if defined(HAS_UI_SOUND) || defined(HAS_TANMATSU)
+  chip_count++;   // Do Not Disturb (sound boards only -- it silences the chime)
+#endif
   if (portrait && chip_count >= 5) {
     // Portrait screens (e.g. the V4) have vertical room below the GPS line, so lay 5+ chips
     // out as TWO rows instead of one cramped row. The row is bottom-anchored and grows
@@ -35461,12 +35528,16 @@ static void openControlCenter() {
   const bool sound_on = g_lv.task && !g_lv.task->isBuzzerQuiet();
   ccToggle(row, LV_SYMBOL_AUDIO, "Sound", sound_on, ccSoundCb, tw, th, CAT_SOUND);
 #endif
+#if defined(HAS_UI_SOUND) || defined(HAS_TANMATSU)
   // Do Not Disturb (the scheduled-silence feature) — dynamic bell: a plain bell when DND is off,
-  // a bell-with-a-slash when it's on. All boards; the time window lives in Settings > Sound.
+  // a bell-with-a-slash when it's on. The time window lives in Settings > Sound. Gated with the
+  // Sound chip above: DND schedules silence for the notification chime, and on a board with no
+  // sound hardware that chime does not exist, so the chip would toggle nothing.
   {
     const bool dnd_on = touchPrefsGetDndEnabled();
     ccToggle(row, dnd_on ? TOUCH_SYM_BELL_SLASH : TOUCH_SYM_BELL, "DND", dnd_on, ccDndCb, tw, th, CAT_SOUND);
   }
+#endif
   // (Power is the round icon in the card's top-right corner, not a grid chip.)
 }
 
@@ -37470,11 +37541,7 @@ static void relayoutHomeCharts() {
   const int cw = tabContentW();
   const int BTNW = SC(100);
   const int RSTRIP = BTNW + 10;
-#if defined(HAS_TDECK_GT911) || defined(HAS_TANMATSU) || defined(HAS_RAK_TAP_V2)
   const int chart_w = home_land ? (cw - RSTRIP) : cw;
-#else
-  const int chart_w = cw;
-#endif
 
   // The env summary line is hard-placed at SC(58) in the tree, which collides with
   // the (up to two-line, WRAP) stats line on the narrow V4 portrait — the stats line
@@ -42274,7 +42341,16 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
         s_rmt_boot_guard = RMT_GUARD_MAGIC;               // arm; cleared after a good run
       }
     }
-    if (s_remote_mode) s_ui_rotation = s_remote_landscape ? LV_DISP_ROT_270 : LV_DISP_ROT_NONE;
+    // Remote landscape follows the board's OWN landscape rotation. The panel-rotation
+    // boards are not all the same handedness: most are ROT_270-native, but this one is
+    // ROT_90 (see the ATTAKY_MESH_SERIES block above), and the two differ by exactly
+    // 180°. Hardcoding 270 leaves remote mode upside down on a ROT_90-native board.
+#if defined(ATTAKY_MESH_SERIES)
+    const uint8_t remote_ls_rot = LV_DISP_ROT_90;
+#else
+    const uint8_t remote_ls_rot = LV_DISP_ROT_270;
+#endif
+    if (s_remote_mode) s_ui_rotation = s_remote_landscape ? remote_ls_rot : LV_DISP_ROT_NONE;
 #endif
     // Apply the saved backlight brightness (takes the LEDA pin over from the
     // display's digitalWrite via LEDC PWM). Both touch boards have the LEDA pin.
@@ -43304,6 +43380,11 @@ void UITask::noteUserInput() {
    * release that. Idle-timeout locks still unlock on touch. */
   if (_screen_off && _manual_lock) return;
   _last_input_ms = millis();
+#if defined(ATTAKY_MESH_SERIES)
+  // This board wakes on POWER_BTN only (polled in the UI loop). A touch on a dark
+  // panel is already absorbed by the indev read, and must not light it either.
+  if (_screen_off) return;
+#endif
   if (_screen_off) wakeScreen();
 }
 
@@ -44344,6 +44425,16 @@ void UITask::loop() {
   serviceLockscreen();
   serviceLockingCountdown(now);
 #endif
+#if defined(ATTAKY_MESH_SERIES)
+  // POWER_BTN (AW9523 @0x59 P07) toggles the panel. Polled before the screen-off
+  // early-outs below so it still reaches us with the backlight down — it is the
+  // only way to wake this board (touch is absorbed while dark, see noteUserInput).
+  attakyKeysPoll();
+  if (attakyPowerKeyPressed()) {
+    if (_screen_off) wakeScreen();
+    else             sleepScreen();
+  }
+#endif
 #if defined(HAS_ATTAKY_MESH_KEYBOARD)
   {
     lv_obj_t* akb_ta = g_lv.keyboard ? lv_keyboard_get_textarea(g_lv.keyboard) : nullptr;
@@ -44352,8 +44443,44 @@ void UITask::loop() {
       int key = attakyKeyboardReadKey();
       if (key <= 0) break;
       if (!_screen_off) noteUserInput();
-      if (key == 0x0D || key == 0x0A)      lv_event_send(g_lv.keyboard, LV_EVENT_READY, nullptr);
+      // Enter in the chat composer sends, the way a physical keyboard does upstream.
+      // That branch lives in handleHwKey(), which this board does not compile, and the
+      // keyboard's READY event is not a substitute: in this touch UI READY is the
+      // on-screen keyboard's tick — it only dismisses the keys, while sending sits on
+      // the composer's send button. Honour the same enter-sends preference upstream
+      // gates its physical-keyboard Enter on, and rebind afterwards so the module can
+      // type the next message straight away (the send path takes the keys down).
+      if (key == 0x0D || key == 0x0A) {
+        if (s_kb_panel && touchPrefsGetEnterSends()) {
+          LvChatPanel* const p = s_kb_panel;   // the send path clears s_kb_panel
+          composerSendFromPanel(p);
+          if (p->composer_ta && lv_obj_is_valid(p->composer_ta)) showKb(p);
+          break;   // keyboard rebound above; akb_ta is stale from here
+        }
+        else if (s_kb_panel) lv_textarea_add_char(akb_ta, '\n');   // enter-sends off: compose multi-line
+        else {
+          lv_event_send(g_lv.keyboard, LV_EVENT_READY, nullptr);   // settings field: confirm
+          break;   // READY ran keyboardCb synchronously, which took the keys down and put
+                   // the module back on the real field — akb_ta is stale here too, so a key
+                   // already queued behind Enter would be typed into the unbound mirror
+        }
+      }
       else if (key == 0x08 || key == 0x7F) lv_textarea_del_char(akb_ta);
+      // '#' summons the on-screen keys the module otherwise keeps down, for the rest
+      // of this editing session (hideKb clears the override). It is the module's own
+      // key rather than a button on screen, so no Attaky-only widget enters the UI.
+      // The keys open straight on the symbol panel: letters and digits are already
+      // under the user's thumbs, so the only reason to summon the on-screen keys is
+      // a symbol this 5x5 matrix cannot reach. '#' is spent on the summon, not typed.
+      else if (key == '#' && attakyKeyboardPresent() && !s_osk_forced) {
+        s_osk_forced = true;
+        if (s_kb_panel) showKb(s_kb_panel);
+        else            kbMirrorBind(akb_ta);
+        // Set the mode after the reveal -- it redraws the button map, and both
+        // paths above touch the keyboard object. 'abc' still switches to letters.
+        if (g_lv.keyboard) lv_keyboard_set_mode(g_lv.keyboard, LV_KEYBOARD_MODE_SPECIAL);
+        break;   // both rebind the keyboard's textarea; akb_ta is stale from here
+      }
       else if (key >= 0x20)                lv_textarea_add_char(akb_ta, (uint32_t)key);
     }
   }
